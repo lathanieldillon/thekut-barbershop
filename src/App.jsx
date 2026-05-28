@@ -217,16 +217,32 @@ function PaymentForm({ service, date, time, onBack, onPaid }) {
   const [contact, setContact] = useState({ name:"", phone:"", email:"", notes:"" });
   const [card, setCard]     = useState({ number:"", expiry:"", cvv:"", name:"" });
   const [foc, setFoc]       = useState("");
+  const [wantsPush, setWantsPush] = useState(null); // null=unanswered, true=yes, false=no
+  const [pushSubId, setPushSubId] = useState(null);
+  const [pushLoading, setPushLoading] = useState(false);
   const setC = (k,v) => setContact(p=>({...p,[k]:v}));
   const setK = (k,v) => setCard(p=>({...p,[k]:v}));
-  const contactOk = contact.name.trim() && contact.phone.trim();
+  const contactOk = contact.name.trim() && contact.phone.trim() && wantsPush !== null;
   const cardOk    = card.number.replace(/\s/g,"").length===16 && card.expiry.length===5 && card.cvv.length>=3 && card.name.trim();
+
+  const handlePushYes = async () => {
+    setPushLoading(true);
+    setWantsPush(true);
+    try {
+      if (window.OneSignal) {
+        await window.OneSignal.Notifications.requestPermission();
+        const id = window.OneSignal.User.PushSubscription.id;
+        setPushSubId(id || null);
+      }
+    } catch(e) { console.log("Push error:", e); }
+    setPushLoading(false);
+  };
 
   const pay = () => {
     if(!cardOk) return;
     setStage("processing");
     setTimeout(()=>{
-      onPaid({ id:genId(), service, date:date.toISOString(), time, customer:contact, card:{ last4:card.number.replace(/\s/g,"").slice(-4), name:card.name }, status:"pending", amount:service.price, createdAt:new Date().toISOString(), smsSent:false });
+      onPaid({ id:genId(), service, date:date.toISOString(), time, customer:contact, card:{ last4:card.number.replace(/\s/g,"").slice(-4), name:card.name }, status:"pending", amount:service.price, createdAt:new Date().toISOString(), smsSent:false, pushSubscriptionId: wantsPush ? pushSubId : null });
     }, 2000);
   };
 
@@ -268,6 +284,30 @@ function PaymentForm({ service, date, time, onBack, onPaid }) {
               style={inp(foc===f.k)} onFocus={()=>setFoc(f.k)} onBlur={()=>setFoc("")}/>
           </div>
         ))}
+        {/* Push Notification Opt-In */}
+        <div style={{ marginBottom:24, background:"#111", border:"1px solid #1e1e1e", borderRadius:6, padding:"18px 20px" }}>
+          <div style={{ display:"flex", alignItems:"flex-start", gap:10, marginBottom:14 }}>
+            <span style={{ fontSize:20 }}>🔔</span>
+            <div>
+              <div style={{ fontWeight:600, fontSize:14, marginBottom:4 }}>Appointment Reminders</div>
+              <div style={{ color:"#666", fontSize:12, lineHeight:1.5 }}>Get a push notification 1 hour before your appointment. No spam — just your reminder.</div>
+            </div>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+            <button onClick={handlePushYes} style={{ background: wantsPush===true ? RED : "#1a1a1a", color: wantsPush===true ? "#fff" : "#888", border: wantsPush===true ? "none" : "1px solid #2a2a2a", borderRadius:4, padding:"12px", fontSize:13, fontWeight:600, cursor:"pointer", transition:"all 0.2s" }}>
+              {pushLoading ? "Setting up..." : wantsPush===true ? "✓ Yes, remind me" : "Yes"}
+            </button>
+            <button onClick={()=>{ setWantsPush(false); setPushSubId(null); }} style={{ background: wantsPush===false ? "#1e1e1e" : "#1a1a1a", color: wantsPush===false ? "#aaa" : "#555", border: wantsPush===false ? "1px solid #333" : "1px solid #222", borderRadius:4, padding:"12px", fontSize:13, fontWeight:600, cursor:"pointer", transition:"all 0.2s" }}>
+              No thanks
+            </button>
+          </div>
+          {wantsPush===true && !pushSubId && !pushLoading && (
+            <p style={{ color:"#f59e0b", fontSize:11, marginTop:10, marginBottom:0 }}>⚠️ Click Allow in your browser prompt to activate reminders.</p>
+          )}
+          {wantsPush===true && pushSubId && (
+            <p style={{ color:"#4ade80", fontSize:11, marginTop:10, marginBottom:0 }}>✓ Reminders activated!</p>
+          )}
+        </div>
         <button onClick={()=>contactOk&&setStage("payment")} style={redBtn(!contactOk)}>Continue to Payment →</button>
       </div>
     </div>
@@ -517,6 +557,12 @@ export default function App() {
     const l=document.createElement("link");
     l.href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow:wght@400;500;600;700&display=swap";
     l.rel="stylesheet"; document.head.appendChild(l);
+
+    // OneSignal init
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window.OneSignalDeferred.push(async function(OneSignal) {
+      await OneSignal.init({ appId: "fc2e2f0c-9571-43c1-ba85-967035c2f521" });
+    });
   },[]);
 
   const reset = () => { setStep("landing"); setSvc(null); setDate(null); setTime(null); setCfm(null); };
@@ -524,7 +570,26 @@ export default function App() {
   if(mode==="admin_login") return <AdminLogin onLogin={()=>setMode("admin")} onBack={()=>setMode("customer")}/>;
   if(mode==="admin")       return <AdminDashboard bookings={bookings} onUpdate={updateBooking} onLogout={()=>setMode("customer")}/>;
   if(confirmed) return <Confirmed booking={confirmed} onReset={reset}/>;
-  if(step==="payment") return <PaymentForm service={service} date={date} time={time} onBack={()=>setStep("datetime")} onPaid={async b=>{await addBooking(b);setCfm(b);}}/>;
+  if(step==="payment") return <PaymentForm service={service} date={date} time={time} onBack={()=>setStep("datetime")} onPaid={async b=>{
+          // Get OneSignal subscription ID if available
+          let pushId = null;
+          try {
+            if(window.OneSignal) {
+              pushId = await window.OneSignal.User.PushSubscription.id;
+            }
+          } catch(e) {}
+          const bookingWithPush = { ...b, pushSubscriptionId: pushId };
+          await addBooking(bookingWithPush);
+          // Fire n8n webhook for SMS + Airtable + Push
+          try {
+            await fetch("https://ldillon.app.n8n.cloud/webhook/thekut-booking", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(bookingWithPush)
+            });
+          } catch(e) { console.log("Webhook error:", e); }
+          setCfm(bookingWithPush);
+        }}/>;
   if(step==="datetime") return <DateTime service={service} onBack={()=>setStep("services")} onNext={(d,t)=>{setDate(d);setTime(t);setStep("payment");}}/>;
   if(step==="services") return <ServiceList onBack={()=>setStep("landing")} onSelect={s=>{setSvc(s);setStep("datetime");}}/>;
   return <Landing onBook={()=>setStep("services")} onQuick={s=>{setSvc(s);setStep("datetime");}} onAdmin={()=>setMode("admin_login")}/>;
