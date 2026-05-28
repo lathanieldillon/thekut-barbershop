@@ -42,21 +42,22 @@ const fmtDate  = d => `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate(
 const genId    = () => "TKB-"+Math.random().toString(36).slice(2,8).toUpperCase();
 
 function useBookings() {
-  const [bookings, setBookings] = useState([]);
-  useEffect(() => {
-    (async () => { try { const r = await window.storage.get("tkb_bookings"); if(r?.value) setBookings(JSON.parse(r.value)); } catch {} })();
-  }, []);
-  const persist = async next => { setBookings(next); try { await window.storage.set("tkb_bookings", JSON.stringify(next)); } catch {} };
+  const [bookings, setBookings] = useState(() => {
+    try { const s = localStorage.getItem("tkb_bookings"); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
+  const persist = next => {
+    setBookings(next);
+    try { localStorage.setItem("tkb_bookings", JSON.stringify(next)); } catch {}
+  };
   const addBooking    = b  => persist([b, ...bookings]);
   const updateBooking = (id, ch) => persist(bookings.map(b => b.id===id ? {...b,...ch} : b));
   return { bookings, addBooking, updateBooking };
 }
 function useTwilio() {
-  const [cfg, setCfg] = useState({ sid:"", token:"", from:"" });
-  useEffect(() => {
-    (async () => { try { const r = await window.storage.get("twilio_cfg"); if(r?.value) setCfg(JSON.parse(r.value)); } catch {} })();
-  }, []);
-  const saveCfg = async c => { setCfg(c); try { await window.storage.set("twilio_cfg", JSON.stringify(c)); } catch {} };
+  const [cfg, setCfg] = useState(() => {
+    try { const s = localStorage.getItem("twilio_cfg"); return s ? JSON.parse(s) : { sid:"", token:"", from:"" }; } catch { return { sid:"", token:"", from:"" }; }
+  });
+  const saveCfg = c => { setCfg(c); try { localStorage.setItem("twilio_cfg", JSON.stringify(c)); } catch {} };
   return { cfg, saveCfg };
 }
 
@@ -435,9 +436,33 @@ function AdminDashboard({ bookings, onUpdate, onLogout }) {
   const [filter, setFilter] = useState("all");
   const [smsId, setSmsId]   = useState(null);
   const [tab, setTab]       = useState("bookings");
+  const [confirming, setConfirming] = useState(null);
   const { cfg, saveCfg }    = useTwilio();
   const [tForm, setTForm]   = useState(cfg);
   useEffect(()=>setTForm(cfg),[cfg]);
+
+  const confirmBooking = async (b) => {
+    setConfirming(b.id);
+    onUpdate(b.id, { status:"confirmed" });
+    // Fire push notification if customer subscribed
+    if (b.pushSubscriptionId) {
+      try {
+        await fetch("https://ldillon.app.n8n.cloud/webhook/thekut-confirmed", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({
+            bookingId: b.id,
+            pushSubscriptionId: b.pushSubscriptionId,
+            customerName: b.customer.name,
+            serviceName: b.service.name,
+            time: b.time,
+            date: b.date,
+          })
+        });
+      } catch(e) { console.log("Push webhook error:", e); }
+    }
+    setConfirming(null);
+  };
 
   const today   = new Date().toDateString();
   const todayCt = bookings.filter(b=>new Date(b.date).toDateString()===today).length;
@@ -504,7 +529,7 @@ function AdminDashboard({ bookings, onUpdate, onLogout }) {
               </div>
               <div style={{ color:"#2a2a2a", fontSize:10, fontFamily:"'Courier New',monospace", marginBottom:12 }}>{b.id}</div>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                {b.status==="pending" && <button onClick={()=>onUpdate(b.id,{status:"confirmed"})} style={{ background:"rgba(96,165,250,0.1)", border:"1px solid rgba(96,165,250,0.3)", color:"#60a5fa", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>Confirm</button>}
+                {b.status==="pending" && <button onClick={()=>confirmBooking(b)} style={{ background:"rgba(96,165,250,0.1)", border:"1px solid rgba(96,165,250,0.3)", color:"#60a5fa", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2, opacity:confirming===b.id?0.5:1 }}>{confirming===b.id?"Confirming...":"Confirm"}</button>}
                 {(b.status==="pending"||b.status==="confirmed") && <button onClick={()=>onUpdate(b.id,{status:"completed"})} style={{ background:"rgba(74,222,128,0.1)", border:"1px solid rgba(74,222,128,0.3)", color:"#4ade80", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>Complete</button>}
                 {b.status!=="cancelled"&&b.status!=="completed" && <button onClick={()=>onUpdate(b.id,{status:"cancelled"})} style={{ background:"rgba(248,113,113,0.1)", border:"1px solid rgba(248,113,113,0.3)", color:"#f87171", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>Cancel</button>}
                 <button onClick={()=>setSmsId(smsId===b.id?null:b.id)} style={{ background:b.smsSent?"rgba(232,22,12,0.04)":"rgba(232,22,12,0.1)", border:`1px solid rgba(232,22,12,${b.smsSent?"0.1":"0.3"})`, color:b.smsSent?"#444":RED, padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>
