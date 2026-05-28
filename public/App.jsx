@@ -524,7 +524,18 @@ export default function App() {
   if(mode==="admin_login") return <AdminLogin onLogin={()=>setMode("admin")} onBack={()=>setMode("customer")}/>;
   if(mode==="admin")       return <AdminDashboard bookings={bookings} onUpdate={updateBooking} onLogout={()=>setMode("customer")}/>;
   if(confirmed) return <Confirmed booking={confirmed} onReset={reset}/>;
-  if(step==="payment") return <PaymentForm service={service} date={date} time={time} onBack={()=>setStep("datetime")} onPaid={async b=>{await addBooking(b);setCfm(b);}}/>;
+  if(step==="payment") return <PaymentForm service={service} date={date} time={time} onBack={()=>setStep("datetime")} onPaid={async b=>{
+          await addBooking(b);
+          // Fire n8n webhook for SMS + Airtable
+          try {
+            await fetch("https://ldillon.app.n8n.cloud/webhook/thekut-booking", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(b)
+            });
+          } catch(e) { console.log("Webhook error:", e); }
+          setCfm(b);
+        }}/>;
   if(step==="datetime") return <DateTime service={service} onBack={()=>setStep("services")} onNext={(d,t)=>{setDate(d);setTime(t);setStep("payment");}}/>;
   if(step==="services") return <ServiceList onBack={()=>setStep("landing")} onSelect={s=>{setSvc(s);setStep("datetime");}}/>;
   return <Landing onBook={()=>setStep("services")} onQuick={s=>{setSvc(s);setStep("datetime");}} onAdmin={()=>setMode("admin_login")}/>;
