@@ -41,6 +41,8 @@ const fmtPhone = v => { const d=v.replace(/\D/g,"").slice(0,10); if(d.length<4)r
 const fmtDate  = d => `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
 const genId    = () => "TKB-"+Math.random().toString(36).slice(2,8).toUpperCase();
 
+const N8N = "https://ldillon.app.n8n.cloud/webhook";
+
 function useBookings() {
   const [bookings, setBookings] = useState(() => {
     try { const s = localStorage.getItem("tkb_bookings"); return s ? JSON.parse(s) : []; } catch { return []; }
@@ -52,6 +54,43 @@ function useBookings() {
   const addBooking    = b  => persist([b, ...bookings]);
   const updateBooking = (id, ch) => persist(bookings.map(b => b.id===id ? {...b,...ch} : b));
   return { bookings, addBooking, updateBooking };
+}
+
+function useAdminBookings() {
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
+
+  const fetchBookings = async () => {
+    setLoading(true); setError(null);
+    try {
+      const res = await fetch(`${N8N}/thekut-admin-bookings`);
+      if (!res.ok) throw new Error("Failed to load");
+      const data = await res.json();
+      setBookings(Array.isArray(data) ? data : []);
+    } catch(e) {
+      setError("Could not load bookings from Airtable");
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchBookings(); }, []);
+
+  const updateBooking = async (id, changes) => {
+    // Optimistic update
+    setBookings(prev => prev.map(b => b.id===id ? {...b,...changes} : b));
+    if (changes.status) {
+      try {
+        await fetch(`${N8N}/thekut-admin-update`, {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({ bookingId: id, status: changes.status })
+        });
+      } catch(e) { console.log("Update error:", e); }
+    }
+  };
+
+  return { bookings, loading, error, fetchBookings, updateBooking };
 }
 function useTwilio() {
   const [cfg, setCfg] = useState(() => {
@@ -432,7 +471,18 @@ function SMSModal({ booking, onClose, onSent }) {
 }
 
 // ── ADMIN DASHBOARD ───────────────────────────────────────────────────────────
-function AdminDashboard({ bookings, onUpdate, onLogout }) {
+function AdminDashboard({ bookings: localBookings, onUpdate: localUpdate, onLogout }) {
+  const { bookings: airtableBookings, loading, error, fetchBookings, updateBooking: remoteUpdate } = useAdminBookings();
+  // Use Airtable bookings if loaded, fall back to local
+  const bookings = airtableBookings.length > 0 ? airtableBookings : localBookings;
+  const onUpdate = async (id, changes) => {
+    localUpdate(id, changes);
+    await remoteUpdate(id, changes);
+    if (changes.status === "confirmed") {
+      const b = bookings.find(x => x.id === id);
+      if (b) confirmBooking({...b, ...changes});
+    }
+  };
   const [filter, setFilter] = useState("all");
   const [smsId, setSmsId]   = useState(null);
   const [tab, setTab]       = useState("bookings");
@@ -443,8 +493,6 @@ function AdminDashboard({ bookings, onUpdate, onLogout }) {
 
   const confirmBooking = async (b) => {
     setConfirming(b.id);
-    onUpdate(b.id, { status:"confirmed" });
-    // Fire push notification if customer subscribed
     if (b.pushSubscriptionId) {
       try {
         await fetch("https://ldillon.app.n8n.cloud/webhook/thekut-confirmed", {
@@ -481,7 +529,10 @@ function AdminDashboard({ bookings, onUpdate, onLogout }) {
             <h2 style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:24, letterSpacing:2, margin:0, color:"#f0ece4" }}>The Kut Barbershop</h2>
           </div>
         </div>
-        <button onClick={onLogout} style={{ background:"#1e1e1e", border:"1px solid #2a2a2a", color:"#666", padding:"8px 16px", fontSize:10, cursor:"pointer", borderRadius:2, letterSpacing:1, textTransform:"uppercase" }}>Logout</button>
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <button onClick={fetchBookings} style={{ background:"#1e1e1e", border:"1px solid #2a2a2a", color:"#666", padding:"8px 14px", fontSize:10, cursor:"pointer", borderRadius:2, letterSpacing:1, textTransform:"uppercase" }}>{loading?"Loading...":"↻ Refresh"}</button>
+          <button onClick={onLogout} style={{ background:"#1e1e1e", border:"1px solid #2a2a2a", color:"#666", padding:"8px 16px", fontSize:10, cursor:"pointer", borderRadius:2, letterSpacing:1, textTransform:"uppercase" }}>Logout</button>
+        </div>
       </div>
       <div style={{ display:"flex", borderBottom:"1px solid #191919" }}>
         {[["bookings","Bookings"],["settings","Settings"]].map(([t,l])=>(
@@ -529,7 +580,7 @@ function AdminDashboard({ bookings, onUpdate, onLogout }) {
               </div>
               <div style={{ color:"#2a2a2a", fontSize:10, fontFamily:"'Courier New',monospace", marginBottom:12 }}>{b.id}</div>
               <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                {b.status==="pending" && <button onClick={()=>confirmBooking(b)} style={{ background:"rgba(96,165,250,0.1)", border:"1px solid rgba(96,165,250,0.3)", color:"#60a5fa", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2, opacity:confirming===b.id?0.5:1 }}>{confirming===b.id?"Confirming...":"Confirm"}</button>}
+                {b.status==="pending" && <button onClick={()=>onUpdate(b.id,{status:"confirmed"})} style={{ background:"rgba(96,165,250,0.1)", border:"1px solid rgba(96,165,250,0.3)", color:"#60a5fa", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2, opacity:confirming===b.id?0.5:1 }}>{confirming===b.id?"Confirming...":"Confirm"}</button>}
                 {(b.status==="pending"||b.status==="confirmed") && <button onClick={()=>onUpdate(b.id,{status:"completed"})} style={{ background:"rgba(74,222,128,0.1)", border:"1px solid rgba(74,222,128,0.3)", color:"#4ade80", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>Complete</button>}
                 {b.status!=="cancelled"&&b.status!=="completed" && <button onClick={()=>onUpdate(b.id,{status:"cancelled"})} style={{ background:"rgba(248,113,113,0.1)", border:"1px solid rgba(248,113,113,0.3)", color:"#f87171", padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>Cancel</button>}
                 <button onClick={()=>setSmsId(smsId===b.id?null:b.id)} style={{ background:b.smsSent?"rgba(232,22,12,0.04)":"rgba(232,22,12,0.1)", border:`1px solid rgba(232,22,12,${b.smsSent?"0.1":"0.3"})`, color:b.smsSent?"#444":RED, padding:"6px 14px", fontSize:10, fontWeight:700, letterSpacing:1, textTransform:"uppercase", cursor:"pointer", borderRadius:2 }}>
